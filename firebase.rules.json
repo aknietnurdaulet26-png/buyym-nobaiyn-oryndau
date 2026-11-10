@@ -1,19 +1,73 @@
 {
- "rules": {
-  ".read": false, ".write": false,
-  "nobaiV2": { "$room": {
-   ".read": "auth != null && data.child('meta/owner').val() === auth.uid",
-   ".write": "auth != null && data.child('meta/owner').val() === auth.uid",
-   "meta": {
-    "owner": {".read": "auth != null", ".write": "auth != null && !data.exists() && newData.val() === auth.uid", ".validate": "newData.isString() && (!data.exists() || newData.val() === data.val())"},
-    "online": {".read": "auth != null"}
-   },
-   "clients": {"$uid": {
-    ".read": "auth != null && auth.uid === $uid",
-    "instance": {".write": "auth != null && auth.uid === $uid && root.child('nobaiV2').child($room).child('meta/owner').exists()", ".validate": "newData.isString() && newData.val().length <= 100"},
-    "online": {".write": "auth != null && auth.uid === $uid && root.child('nobaiV2').child($room).child('meta/owner').exists()", ".validate": "newData.isBoolean()"},
-    "up": {".write": "auth != null && auth.uid === $uid && root.child('nobaiV2').child($room).child('meta/owner').exists()", ".validate": "newData.hasChildren(['instance','seq','data'])", "instance": {".validate":"newData.isString() && newData.val().length <= 100"}, "seq":{".validate":"newData.isNumber() && newData.val() >= 0"}, "data":{".validate":"newData.hasChild('type')"}}
-   }}
-  }}
- }
+  "rules": {
+    ".read": false,
+    ".write": false,
+    "nobaiV2": {
+      "$room": {
+        ".validate": "$room.matches(/^\\d{6}$/)",
+        "meta": {
+          "owner": {
+            ".read": "auth != null",
+            ".write": "auth != null && $room.matches(/^\\d{6}$/) && !data.exists() && newData.val() === auth.uid",
+            ".validate": "newData.isString() && newData.val().length <= 128"
+          },
+          "online": {
+            ".read": "auth != null && root.child('nobaiV2').child($room).child('meta/owner').exists()",
+            ".write": "auth != null && root.child('nobaiV2').child($room).child('meta/owner').val() === auth.uid",
+            ".validate": "newData.isBoolean()"
+          }
+        },
+        "snapshot": {
+          ".read": "auth != null && root.child('nobaiV2').child($room).child('meta/owner').val() === auth.uid",
+          ".write": "auth != null && root.child('nobaiV2').child($room).child('meta/owner').val() === auth.uid",
+          ".validate": "newData.hasChildren(['version','room','phase','round','revision']) && newData.child('version').val() === 2 && newData.child('room').val() === $room && !newData.child('players/30').exists() && newData.child('revision').isNumber() && newData.child('phase').isString()"
+        },
+        "clients": {
+          ".read": "auth != null && root.child('nobaiV2').child($room).child('meta/owner').val() === auth.uid",
+          "$uid": {
+            ".read": "auth != null && auth.uid === $uid",
+            "instance": {
+              ".write": "auth != null && auth.uid === $uid && root.child('nobaiV2').child($room).child('meta/owner').exists()",
+              ".validate": "newData.isString() && newData.val().length >= 8 && newData.val().length <= 100"
+            },
+            "online": {
+              ".write": "auth != null && auth.uid === $uid && root.child('nobaiV2').child($room).child('meta/owner').exists()",
+              ".validate": "newData.isBoolean()"
+            },
+            "up": {
+              ".read": "auth != null && auth.uid === $uid",
+              "$message": {
+                ".write": "auth != null && auth.uid === $uid && root.child('nobaiV2').child($room).child('meta/owner').exists() && !data.exists() && newData.child('id').val() === $message",
+                ".validate": "newData.hasChildren(['id','instance','seq','data']) && newData.child('instance').isString() && newData.child('instance').val().length >= 8 && newData.child('instance').val().length <= 100 && newData.child('seq').isNumber() && newData.child('seq').val() > 0 && newData.child('data/type').isString() && (newData.child('data/type').val() === 'join' && newData.child('data/version').val() === 2 && newData.child('data/token').isString() && newData.child('data/token').val().length >= 16 && newData.child('data/token').val().length <= 100 && newData.child('data/name').isString() && newData.child('data/name').val().length > 0 && newData.child('data/name').val().length <= 32 || newData.child('data/type').val() === 'answer' && newData.child('data/round').isNumber() && newData.child('data/round').val() >= 0 && newData.child('data/round').val() <= 14 && newData.child('data/choice').isNumber() && newData.child('data/choice').val() >= 0 && newData.child('data/choice').val() <= 3)",
+                "id": {".validate": "newData.isString() && newData.val().length <= 32"},
+                "instance": {".validate": "newData.isString() && newData.val().length <= 100"},
+                "seq": {".validate": "newData.isNumber()"},
+                "data": {
+                  "type": {".validate": "newData.isString()"},
+                  "version": {".validate": "newData.isNumber()"},
+                  "token": {".validate": "newData.isString() && newData.val().length <= 100"},
+                  "name": {".validate": "newData.isString() && newData.val().length <= 32"},
+                  "round": {".validate": "newData.isNumber()"},
+                  "choice": {".validate": "newData.isNumber()"},
+                  "$other": {".validate": false}
+                },
+                "$other": {".validate": false}
+              }
+            },
+            "down": {
+              ".read": "auth != null && auth.uid === $uid",
+              "state": {
+                ".write": "auth != null && root.child('nobaiV2').child($room).child('meta/owner').val() === auth.uid && (!data.exists() || newData.child('seq').val() > data.child('seq').val())",
+                ".validate": "newData.hasChildren(['instance','seq','data']) && newData.child('instance').isString() && newData.child('instance').val().length <= 100 && newData.child('seq').isNumber() && newData.child('data/type').val() === 'state' && !newData.child('data/board/30').exists()"
+              },
+              "ack": {
+                ".write": "auth != null && root.child('nobaiV2').child($room).child('meta/owner').val() === auth.uid && (!data.exists() || newData.child('seq').val() > data.child('seq').val())",
+                ".validate": "newData.hasChildren(['instance','seq','data']) && newData.child('instance').isString() && newData.child('instance').val().length <= 100 && newData.child('seq').isNumber() && (newData.child('data/type').val() === 'ack' || newData.child('data/type').val() === 'error')"
+              }
+            }
+          }
+        }
+      }
+    }
+  }
 }

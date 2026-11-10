@@ -1,2 +1,5 @@
 .openai/
 dist/
+node_modules/
+.firebase/
+database-debug.log
