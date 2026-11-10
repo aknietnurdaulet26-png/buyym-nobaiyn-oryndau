@@ -1,0 +1,25 @@
+'use strict';
+const assert=require('node:assert/strict'),{FirebaseTransport}=require('./transport.js');
+(async()=>{
+ const t=new FirebaseTransport(),writes=new Map();let n=0;
+ t.sdk={ref:(_,p)=>p,push:p=>({key:'packet-'+(++n),path:p}),set:async(path,value)=>{assert(!writes.has(path),'unique path');writes.set(path,value);}};
+ t.db={};t.code='123456';t.connected=true;
+ const c=t.channel('student-uid','instance-123456',false);
+ c.send({type:'join',version:2,name:'A',token:'a'.repeat(20)});
+ for(let r=0;r<15;r++)c.send({type:'answer',round:r,choice:r%4});
+ await Promise.resolve();await Promise.resolve();
+ assert.equal(writes.size,16);
+ assert.equal(new Set([...writes.keys()]).size,16);
+ assert.deepEqual([...writes.values()].map(x=>x.seq),Array.from({length:16},(_,i)=>t.seq-15+i));
+ c.confirm({type:'state',answers:{},round:-1});
+ assert.equal(c.pending.size,15);
+ c.confirm({type:'ack',round:0,accepted:false});
+ assert.equal(c.pending.size,14);
+ c.confirm({type:'state',answers:{1:{choice:1}}});
+ assert.equal(c.pending.size,13);
+ for(const p of c.pending.values())p.sent=Date.now()-6000;
+ c.flush();await Promise.resolve();await Promise.resolve();
+ assert.equal(writes.size,29);
+ assert.equal(c.pending.size,13);
+ console.log(JSON.stringify({passed:true,rapidMessages:16,uniqueMessages:16,retriedMessages:13,remainingPending:13}));
+})().catch(e=>{console.error(e);process.exitCode=1;});
