@@ -1,124 +1,77 @@
 'use strict';
 const $=id=>document.getElementById(id);
-let peer, connection, host=false, room='', round=-1, phase='lobby', deadline=0, players=[], offsets=[0,0,0], myState=null, localDeadline=0, pending=false, lastSeen=0, role='', joinTimer;
-const links=new Map();
-let token=sessionStorage.getItem('nobai-token');
-if(!token){token=Array.from(crypto.getRandomValues(new Uint8Array(24)),b=>b.toString(16).padStart(2,'0')).join('');sessionStorage.setItem('nobai-token',token);}
-function random(n){const a=new Uint32Array(1);crypto.getRandomValues(a);return a[0]%n;}
-function notice(text){$('notice').textContent=text;$('notice').hidden=!text;}
-function network(text){$('network').textContent=text;}
-function cleanName(name){return typeof name==='string'?name.trim().replace(/[\u0000-\u001f\u007f]/g,'').slice(0,32):'';}
-function send(c,data){if(c?.open){try{c.send(data);}catch{network('Байланысты тексеріңіз');}}}
-function enter(){ $('home').hidden=true;$('game').hidden=false;$('hostControls').hidden=!host;$('roomCode').textContent=room;notice('');}
-function setupPeer(id){
-  if(!window.Peer){notice('Байланыс кітапханасы жүктелмеді. Интернетті тексеріп, бетті жаңартыңыз.');return null;}
-  const p=id?new Peer(id):new Peer();
-  p.on('error',e=>{clearTimeout(joinTimer);pending=false;$('create').disabled=false;$('joinForm').querySelector('button').disabled=false;
-    const errors={'unavailable-id':'Бұл бөлме коды бос емес. Бөлмені қайта ашыңыз.','peer-unavailable':'Бөлме табылмады. Кодты және мұғалімнің байланысын тексеріңіз.','network':'Интернет байланысы үзілді. Қайта қосылып көріңіз.','webrtc':'Құрылғылар қосыла алмады. Басқа Wi-Fi не мобильді интернетпен тексеріңіз.'};
-    notice(errors[e.type]||'Байланыс орнатылмады. Интернетті тексеріп, қайта қосылыңыз.');network('Байланыс қатесі');if(!host)$('reconnect').hidden=false;
-  });
-  p.on('disconnected',()=>{network('Сервермен байланыс үзілді');if(!p.destroyed){try{p.reconnect();}catch{}}});
-  return p;
+const store={get(k,f=null){try{const v=localStorage.getItem(k);return v===null?f:JSON.parse(v);}catch{return f;}},set(k,v){try{localStorage.setItem(k,JSON.stringify(v));return true;}catch{return false;}}};
+function uid(){return Array.from(crypto.getRandomValues(new Uint8Array(24)),b=>b.toString(16).padStart(2,'0')).join('');}
+function random(n){return crypto.getRandomValues(new Uint32Array(1))[0]%n;}
+const token=store.get('nobai-v2-token')||uid();store.set('nobai-v2-token',token);
+let transport=null,engine=null,connection=null,role='',room='',state=null,pendingAnswer=null,busy=false,generation=0,localDeadline=0,lastSeen=0,retryTimer=null,joinTimer=null,attempts=0,noticeKey='',noticeText='',statusKey='ready',queue=Promise.resolve(),qrRoom='',detailsPlayer=null;
+const links=new Map(),seen=new Map();
+function notice(key='',literal=''){noticeKey=key;noticeText=literal;$('notice').textContent=key?t(key):literal;$('notice').hidden=!(key||literal);}
+function status(key){statusKey=key;$('network').textContent=t(key);if(['timeout','peerUnavailable','unavailableId','permission','firebaseSetup','library'].includes(key))notice(key);}
+function send(c,data){if(c?.open){try{c.send(data);}catch{status('networkError');}}}
+function enqueue(fn){queue=queue.then(fn).catch(e=>{notice(e.message in WORDS?e.message:'networkError');busy=false;render();});return queue;}
+function online(tok){return !!links.get(tok)?.open&&(Date.now()-(seen.get(tok)||0)<20000);}
+async function persistHost(){if(!store.set('nobai-v2-host',engine.save()))notice('storage');await transport.saveHost(engine.save());}
+function sendState(tok){send(links.get(tok),engine.state(tok,online));}
+function broadcast(){for(const p of engine.data.players)sendState(p.token);renderHost();}
+function enter(){ $('home').hidden=true;$('game').hidden=false;$('hostControls').hidden=role!=='host';$('roomCode').textContent=room;}
+function setBusy(v){busy=v;$('create').disabled=v;$('restore').disabled=v;$('joinForm').querySelector('[type=submit]').disabled=v;}
+function shutdown(){generation++;clearTimeout(joinTimer);clearTimeout(retryTimer);transport?.close();transport=null;connection=null;links.clear();seen.clear();setBusy(false);}
+function handleConnection(c){let identity=null;const gen=generation;const timer=setTimeout(()=>{if(!identity)c.close();},15000);
+ c.on('data',msg=>{if(gen!==generation||!msg||typeof msg!=='object')return;enqueue(async()=>{
+  if(gen!==generation)return;
+  if(!identity){if(msg.type!=='join'||msg.version!==2){send(c,{type:'error',key:'version'});return;}try{const p=engine.join(msg.token,msg.name);identity=p.token;clearTimeout(timer);const old=links.get(identity);links.set(identity,c);seen.set(identity,Date.now());if(old&&old!==c)old.close();await persistHost();broadcast();}catch(e){send(c,{type:'error',key:e.message in WORDS?e.message:'invalid'});}return;}
+  if(links.get(identity)!==c)return;seen.set(identity,Date.now());
+  if(msg.type==='sync'){sendState(identity);return;}
+  if(msg.type==='answer'){const result=engine.answer(identity,msg.round,msg.choice);await persistHost();send(c,{type:'ack',round:msg.round,accepted:result.accepted});broadcast();}
+ });});
+ c.on('close',()=>{clearTimeout(timer);if(gen===generation&&identity&&links.get(identity)===c){links.delete(identity);renderHost();}});c.on('error',()=>{if(identity)seen.delete(identity);});
 }
-function questionFor(p){return QuizCore.question(BANK,p.slot,round,offsets);}
-function board(){return QuizCore.ranking(players.map(p=>({name:p.name,slot:p.slot,score:p.score,online:!!links.get(p.token)?.open,answered:round>=0&&!!p.answers[round]})));}
-function stateFor(p){const a=p.answers[round], q=round>=0?questionFor(p):null;return {type:'state',phase,round,room,slot:p.slot,remaining:Math.max(0,deadline-Date.now()),board:board(),question:q?{text:q.text,options:q.options,level:q.level}:null,answer:a?{choice:a.choice,correct:phase!=='active'?q.correct:null}:null,reveal:phase!=='active'&&q?q.correct:null};}
-function broadcast(){for(const p of players)send(links.get(p.token),stateFor(p));renderHost();}
-function accept(c){
-  let identity=null;
-  const authTimer=setTimeout(()=>{if(!identity)c.close();},12000);
-  c.on('data',data=>{
-    if(!data||typeof data!=='object')return;
-    if(!identity){
-      if(data.type!=='join'||typeof data.token!=='string'||data.token.length>80||!cleanName(data.name)){send(c,{type:'error',text:'Есіміңізді дұрыс енгізіңіз.'});return;}
-      let p=players.find(x=>x.token===data.token);
-      if(!p){
-        if(phase!=='lobby'){send(c,{type:'error',text:'Ойын басталып кетті. Жаңа ойынға қосылыңыз.'});return;}
-        if(players.length>=22){send(c,{type:'error',text:'Бөлме толы: 22 оқушы.'});return;}
-        const name=cleanName(data.name);
-        if(players.some(x=>x.name.toLocaleLowerCase()===name.toLocaleLowerCase())){send(c,{type:'error',text:'Бұл есім қолданылып тұр. Тегіңіздің бас әрпін қосыңыз.'});return;}
-        p={token:data.token,name,slot:players.length,score:0,answers:{}};players.push(p);
-      }
-      identity=p.token;clearTimeout(authTimer);const old=links.get(identity);links.set(identity,c);if(old&&old!==c)old.close();broadcast();return;
-    }
-    if(links.get(identity)!==c)return;
-    const p=players.find(x=>x.token===identity);
-    if(data.type==='sync'){send(c,stateFor(p));return;}
-    if(data.type==='answer'){
-      if(phase==='active'&&Date.now()>=deadline)finishRound();
-      if(phase!=='active'||data.round!==round||p.answers[round]||!Number.isInteger(data.choice)||data.choice<0||data.choice>3){send(c,stateFor(p));return;}
-      const correct=questionFor(p).correct;
-      p.answers[round]={choice:data.choice};if(data.choice===correct)p.score+=100;
-      broadcast();
-    }
-  });
-  c.on('close',()=>{clearTimeout(authTimer);if(identity&&links.get(identity)===c){links.delete(identity);broadcast();}});
-  c.on('error',()=>{network('Бір оқушының байланысы үзілді');});
+async function hostRoom(restore=false){if(busy)return;const saved=restore?store.get('nobai-v2-host'):null;if(restore&&!saved)return;shutdown();role='host';state=null;engine=new RoomEngine(BANK,saved);if(!saved){engine.data.room=String(100000+random(900000));engine.data.offsets=[random(22),random(22),random(22)];}room=engine.data.room;transport=makeTransport();const gen=generation;setBusy(true);notice();status('connecting');try{await transport.openHost(room,handleConnection,k=>{if(gen===generation)status(k);});if(gen!==generation)return;if(restore){const cloud=await transport.loadHost();if(cloud&&cloud.revision>engine.data.revision)engine=new RoomEngine(BANK,cloud);}if(engine.data.phase==='active'&&engine.data.mode==='rounds'&&Date.now()>=engine.data.deadline)engine.close();await persistHost();setBusy(false);enter();renderHost();makeQR();if(restore)notice('restored');}catch(e){if(gen===generation){setBusy(false);notice(e.message in WORDS?e.message:'networkError');}}}
+$('create').onclick=()=>hostRoom();$('restore').onclick=()=>hostRoom(true);
+function clientSaved(){return store.get('nobai-v2-student');}
+async function join(auto=false){if(busy)return;const name=QuizCore.cleanName($('name').value),code=$('code').value.trim();if(!name||!/^\d{6}$/.test(code)){notice('invalid');return;}shutdown();role='student';room=code;lastSeen=Date.now();const old=clientSaved();pendingAnswer=old?.room===room?old.pending:null;store.set('nobai-v2-student',{room,name,pending:pendingAnswer});transport=makeTransport();const gen=generation;setBusy(true);status(auto?'reconnecting':'connecting');if(!auto)notice();
+ joinTimer=setTimeout(()=>{if(gen===generation){setBusy(false);transport?.close();notice('timeout');status('timeout');$('reconnect').hidden=false;}},25000);
+ try{connection=await transport.openClient(room,k=>{if(gen===generation)status(k);});if(gen!==generation)return;const hello=()=>send(connection,{type:'join',version:2,name,token});connection.on('open',hello);if(connection.open)hello();connection.on('data',msg=>receive(msg,gen));connection.on('close',()=>{if(gen===generation)lost();});connection.on('error',()=>{if(gen===generation)lost();});}catch(e){if(gen!==generation)return;clearTimeout(joinTimer);setBusy(false);notice(e.message in WORDS?e.message:'networkError');$('reconnect').hidden=false;}
 }
-$('create').onclick=()=>{
-  if(pending)return;pending=true;host=true;role='host';room=String(100000+random(900000));peer?.destroy();peer=setupPeer('nobai-lab-v1-'+room);
-  if(!peer){pending=false;return;}$('create').disabled=true;
-  peer.on('open',()=>{pending=false;offsets=[random(22),random(22),random(22)];enter();network('Мұғалім · қосылды');renderHost();});peer.on('connection',accept);
-};
-function join(){
-  if(pending)return;
-  const name=cleanName($('name').value),code=$('code').value.trim();
-  if(!name||!/^\d{6}$/.test(code)){notice('Есіміңіз бен 6 таңбалы кодты енгізіңіз.');return;}
-  pending=true;host=false;role='student';room=code;sessionStorage.setItem('nobai-name',name);sessionStorage.setItem('nobai-room',room);peer?.destroy();peer=setupPeer();
-  if(!peer){pending=false;return;}
-  $('joinForm').querySelector('button').disabled=true;network('Қосылуда…');notice('');
-  joinTimer=setTimeout(()=>{pending=false;$('joinForm').querySelector('button').disabled=false;notice('Қосылу уақыты аяқталды. Мұғалімнің қойындысы ашық екенін тексеріп, қайта қосылыңыз.');$('reconnect').hidden=false;},20000);
-  peer.on('open',()=>{
-    connection=peer.connect('nobai-lab-v1-'+room,{reliable:true,serialization:'json'});
-    connection.on('open',()=>send(connection,{type:'join',name,token}));
-    connection.on('data',data=>{
-      if(!data||typeof data!=='object')return;
-      if(data.type==='error'){clearTimeout(joinTimer);pending=false;notice(data.text);$('joinForm').querySelector('button').disabled=false;connection.close();return;}
-      if(data.type==='state'){
-        clearTimeout(joinTimer);pending=false;lastSeen=Date.now();localDeadline=Date.now()+data.remaining;
-        const changed=!myState||myState.round!==data.round||myState.phase!==data.phase||JSON.stringify(myState.answer)!==JSON.stringify(data.answer);
-        myState=data;enter();network('Оқушы · қосылды');$('reconnect').hidden=true;
-        if(changed)renderStudent();renderBoard(data.board,data.slot);
-      }
-    });
-    connection.on('close',lost);connection.on('error',lost);
-  });
+function receive(msg,gen){if(gen!==generation||!msg)return;if(msg.type==='error'){clearTimeout(joinTimer);setBusy(false);notice(msg.key);connection?.close();clearTimeout(retryTimer);$('reconnect').hidden=false;return;}if(msg.type==='ack'){if(pendingAnswer?.round===msg.round&&!msg.accepted){pendingAnswer=null;saveClient();notice('late');renderStudent();}return;}if(msg.type!=='state'||msg.version!==2||msg.room!==room)return;clearTimeout(joinTimer);clearTimeout(retryTimer);setBusy(false);lastSeen=Date.now();attempts=0;const prev=state,hadPending=!!pendingAnswer;state=msg;localDeadline=Date.now()+msg.remaining;status('connected');$('reconnect').hidden=true;enter();
+ if(pendingAnswer){if(msg.answers[pendingAnswer.round]){pendingAnswer=null;saveClient();}else if(msg.phase==='active'&&msg.round===pendingAnswer.round)send(connection,{type:'answer',...pendingAnswer});else{pendingAnswer=null;saveClient();notice('late');}}
+ if(['networkError','timeout','peerUnavailable'].includes(noticeKey))notice();
+ if(!prev||prev.revision!==msg.revision||prev.room!==msg.room||hadPending!==!!pendingAnswer)renderStudent();renderBoard(msg.board,msg.slot);
 }
-function lost(){if(role!=='student')return;pending=false;network('Байланыс үзілді');$('reconnect').hidden=false;document.querySelectorAll('.answer').forEach(b=>b.disabled=true);notice('Байланыс үзілді. Осы беттегі «Қайта қосылу» батырмасын басыңыз. Есім мен ұпай сақталады.');$('joinForm').querySelector('button').disabled=false;}
-$('joinForm').onsubmit=e=>{e.preventDefault();join();};$('reconnect').onclick=()=>{myState=null;join();};
-function renderBoard(rows,me){
-  $('ranking').replaceChildren();
-  if(!rows.length){const li=document.createElement('li');li.textContent='Әзірге оқушы қосылған жоқ';$('ranking').append(li);return;}
-  for(const p of rows){const li=document.createElement('li');if(p.slot===me)li.className='me';const rank=document.createElement('span');rank.className='rank';rank.textContent=p.rank;const name=document.createElement('span');name.className='person';name.textContent=p.name+(p.online?'':' · байланыс жоқ')+(p.answered?' ✓':'');const score=document.createElement('b');score.textContent=p.score+' ұпай';li.append(rank,name,score);$('ranking').append(li);}
+function saveClient(){store.set('nobai-v2-student',{room,name:$('name').value,pending:pendingAnswer});}
+function lost(){if(role!=='student')return;status('reconnecting');notice('networkError');$('reconnect').hidden=false;document.querySelectorAll('.answer').forEach(b=>b.disabled=true);if(!retryTimer&&attempts<5){retryTimer=setTimeout(()=>{retryTimer=null;attempts++;setBusy(false);join(true);},Math.min(1500*2**attempts,12000));}}
+$('joinForm').onsubmit=e=>{e.preventDefault();attempts=0;join();};$('reconnect').onclick=()=>{attempts=0;setBusy(false);join();};$('resumeStudent').onclick=()=>join();
+function renderBoard(rows,me){$('ranking').replaceChildren();if(!rows.length){const li=document.createElement('li');li.textContent=t('empty');$('ranking').append(li);return;}for(const p of rows){const li=document.createElement('li');if(p.rank<=3)li.classList.add('top');if(p.slot===me)li.classList.add('me');const rank=document.createElement('span');rank.className='rank';rank.textContent=p.rank<=3?['🥇','🥈','🥉'][p.rank-1]:p.rank;const person=document.createElement('span');person.className='person';const name=document.createElement(role==='host'?'button':'span');name.textContent=p.name;if(role==='host'){name.title=t('details');name.onclick=()=>showResults(p.slot);}const sub=document.createElement('small');sub.textContent=`${p.progress}/15 · ${t(p.online?'online':'offline')}`;person.append(name,sub);const score=document.createElement('span');score.className='score';score.textContent=p.score+' '+t('score');li.append(rank,person,score);$('ranking').append(li);}}
+function progress(n){$('bar').style.width=Math.max(0,Math.min(100,n/15*100))+'%';document.querySelector('.progress').setAttribute('aria-valuenow',String(Math.max(0,n)));}
+function renderHost(){if(role!=='host'||!engine||$('game').hidden)return;const d=engine.data;$('gameTitle').textContent=t(d.phase==='ended'?'finished':'hostPanel');$('count').textContent=d.players.length+' / 30';$('onlineCount').textContent=d.players.filter(p=>online(p.token)).length+' '+t('online');$('setup').hidden=d.phase!=='lobby';$('mode').value=d.mode;$('duration').value=d.duration;$('duration').disabled=d.mode==='self';$('next').hidden=d.mode==='self'&&d.phase!=='lobby';$('next').disabled=!d.players.length||d.phase==='active'||d.phase==='ended';$('next').textContent=t(d.phase==='lobby'?'start':d.round>=14?'final':'next');$('closeRound').hidden=d.phase!=='active';$('closeRound').textContent=t(d.mode==='self'?'endGame':'endRound');$('stage').textContent=d.round<0?t('waitingHost'):d.mode==='self'?t('selfMode'):`${t('round')} ${d.round+1}/15`;progress(d.phase==='ended'?15:d.mode==='self'?(d.players.reduce((s,p)=>s+p.progress,0)/Math.max(d.players.length,1)):d.round+1);$('question').textContent=t({lobby:'waitingHost',active:'answering',review:'review',ended:'finished'}[d.phase]);$('answers').replaceChildren();$('answerHistory').replaceChildren();$('feedback').textContent=d.phase==='lobby'?t('waitingHint'):d.phase==='ended'?t('saveHint'):d.mode==='self'?`${t('progress')}: ${d.players.reduce((s,p)=>s+p.progress,0)} / ${d.players.length*15}`:`${t('answered')}: ${d.players.filter(p=>p.answers[d.round]).length} / ${d.players.length}`;renderBoard(engine.board(online));}
+function getQ(s,r=s.round){return QuizCore.question(LANG==='ru'?BANK_RU:BANK,s.slot,r,s.offsets);}
+function renderStudent(){if(!state||role!=='student')return;const s=state,p=s.board.find(x=>x.slot===s.slot),done=s.mode==='self'&&s.round>=15;$('gameTitle').textContent=t(s.phase==='ended'?'finished':'yourTurn');$('stage').textContent=s.round<0?t('waitingHost'):`${t('question')} ${Math.min(s.round+1,15)}/15`;progress(s.phase==='ended'||done?15:Math.max(0,s.round));$('answers').replaceChildren();$('answerHistory').replaceChildren();$('feedback').textContent='';
+ if(s.phase==='lobby'){$('question').textContent=t('waiting');return;}
+ if(s.phase==='ended'||done){$('question').textContent=`${t('result')}: ${p.score} / 1500`;$('feedback').textContent=done&&s.phase!=='ended'?t('done'):`${t('place')}: ${p.rank}`;renderHistory($('answerHistory'),s.slot,s.answers,s.offsets);return;}
+ const q=getQ(s),a=s.answers[s.round],reveal=s.phase==='review';$('stage').textContent+=` · ${t('levels')[q.level]}`;$('question').textContent=q.text;
+ q.options.forEach((text,i)=>{const b=document.createElement('button');b.className='answer';const letter=document.createElement('span');letter.textContent='ABCD'[i];b.append(letter,document.createTextNode(text));b.disabled=s.phase!=='active'||!!a||!!pendingAnswer||!connection?.open;if((a?.choice??pendingAnswer?.choice)===i)b.classList.add('selected');if(reveal&&i===q.correct)b.classList.add('correct');if(reveal&&a?.choice===i&&i!==q.correct)b.classList.add('wrong');b.onclick=()=>{if(pendingAnswer||state.round!==s.round)return;pendingAnswer={round:s.round,choice:i};saveClient();renderStudent();send(connection,{type:'answer',...pendingAnswer});};$('answers').append(b);});
+ $('feedback').textContent=pendingAnswer?t('pending'):reveal?t(a?(a.choice===q.correct?'correct':'wrong'):'missed'):t(a?'accepted':'choose');
 }
-function renderHost(){
-  $('count').textContent=players.length+' / 22 оқушы · '+players.filter(p=>links.get(p.token)?.open).length+' желіде';
-  $('gameTitle').textContent=phase==='ended'?'Ойын аяқталды!':'Мұғалім тақтасы';
-  $('stage').textContent=round<0?'ДАЙЫНДЫҚ':`${round+1} / 15 КЕЗЕҢ · ${['БІЛУ','ҚОЛДАНУ','ТАЛДАУ'][round%3]}`;
-  $('bar').style.width=Math.max(0,(round+1)/15*100)+'%';
-  $('next').disabled=!players.length||phase==='active'||phase==='ended';$('next').textContent=round<0?'Ойынды бастау':round===14?'Қорытындыны көрсету':'Келесі кезең →';$('closeRound').hidden=phase!=='active';
-  $('question').textContent=phase==='lobby'?'Оқушыларды күтеміз':phase==='active'?'Әр оқушы өз сұрағына жауап беруде':phase==='ended'?'Жарайсыңдар! Бүгінгі жұмыс аяқталды.':'Кезең аяқталды';
-  $('answers').replaceChildren();const answered=players.filter(p=>p.answers[round]).length;
-  $('feedback').textContent=phase==='lobby'?'Барлық 22 оқушы қосылған соң бастаңыз. Аз оқушымен де бастауға болады.':phase==='ended'?'Нәтижені CSV файлына сақтаңыз.':'Жауап берді: '+answered+' / '+players.length+(answered===players.length?' · Барлығы жауап берді. Кезеңді аяқтауға болады.':'');
-  renderBoard(board());
-}
-function renderStudent(){
-  const s=myState;$('gameTitle').textContent=s.phase==='ended'?'Ойын аяқталды!':'Сенің кезегің';$('stage').textContent=s.round<0?'ДАЙЫНДЫҚ':`${s.round+1} / 15 КЕЗЕҢ · ${['БІЛУ','ҚОЛДАНУ','ТАЛДАУ'][s.round%3]}`;$('bar').style.width=Math.max(0,(s.round+1)/15*100)+'%';$('answers').replaceChildren();$('feedback').textContent='';
-  if(s.phase==='lobby'){$('question').textContent='Қосылдың! Мұғалім ойынды бастағанша күте тұр.';return;}
-  if(s.phase==='ended'){const row=s.board.find(p=>p.slot===s.slot);$('question').textContent='Жарайсың! Сенің нәтижең: '+row.score+' / 1500';$('feedback').textContent='Орның: '+row.rank+'. Әр жаңа идея нобайдан басталады!';return;}
-  $('question').textContent=s.question.text;
-  s.question.options.forEach((text,i)=>{const button=document.createElement('button');button.className='answer';const letter=document.createElement('span');letter.textContent='ABCD'[i];button.append(letter,document.createTextNode(text));button.disabled=s.phase!=='active'||!!s.answer;
-    if(s.answer?.choice===i)button.classList.add('selected');if(s.reveal===i)button.classList.add('correct');if(s.reveal!==null&&s.answer?.choice===i&&i!==s.reveal)button.classList.add('wrong');
-    button.onclick=()=>{document.querySelectorAll('.answer').forEach(b=>b.disabled=true);$('feedback').textContent='Жауап жіберілуде…';send(connection,{type:'answer',round:s.round,choice:i});};$('answers').append(button);
-  });
-  $('feedback').textContent=s.phase==='active'?(s.answer?'Жауап қабылданды! Кезеңнің аяқталуын күт.':'Бір дұрыс жауапты таңда.'):(s.answer?(s.answer.choice===s.reveal?'Дұрыс жауап! +100 ұпай':'Бұл жолы қате. Дұрыс жауап жасылмен белгіленген.'):'Жауап берілмеді. Дұрыс жауап жасылмен белгіленген.');
-}
-$('next').onclick=()=>{if(!host||phase==='active'||phase==='ended'||!players.length)return;if(round===14){phase='ended';broadcast();return;}round++;phase='active';deadline=Date.now()+45000;broadcast();};
-function finishRound(){if(host&&phase==='active'){phase='review';broadcast();}}
-$('closeRound').onclick=finishRound;
-$('copy').onclick=async()=>{const u=new URL(location.href);u.search='';u.searchParams.set('room',room);try{await navigator.clipboard.writeText(u.href);notice('Оқушыларға арналған сілтеме көшірілді.');}catch{notice('Оқушыларға осы сілтемені беріңіз: '+u.href);}};
-$('csv').onclick=()=>{const rows=[['Орын','Есім','Ұпай','Жауап саны'],...board().map(p=>[p.rank,p.name,p.score,Object.keys(players.find(x=>x.slot===p.slot).answers).length])];const blob=new Blob(['\uFEFF'+rows.map(r=>r.map(QuizCore.csvCell).join(',')).join('\r\n')],{type:'text/csv;charset=utf-8'});const url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='nobai-'+room+'-results.csv';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);};
-setInterval(()=>{const active=host?phase==='active':myState?.phase==='active';const remaining=active?Math.max(0,Math.ceil(((host?deadline:localDeadline)-Date.now())/1000)):null;$('timer').textContent=remaining===null?'—':remaining+' с';if(host&&active&&remaining===0)finishRound();if(!host&&active&&remaining===0)document.querySelectorAll('.answer').forEach(b=>b.disabled=true);},250);
-setInterval(()=>{if(host&&peer&&!peer.destroyed)broadcast();else if(connection?.open){send(connection,{type:'sync'});if(lastSeen&&Date.now()-lastSeen>15000)lost();}},5000);
-window.addEventListener('beforeunload',e=>{if(host&&players.length&&phase!=='ended'){e.preventDefault();e.returnValue='';}});
-$('name').value=sessionStorage.getItem('nobai-name')||'';$('code').value=new URLSearchParams(location.search).get('room')||sessionStorage.getItem('nobai-room')||'';
+function renderHistory(container,slot,answers,offsets){container.replaceChildren();for(let r=0;r<15;r++){const a=answers[r],q=QuizCore.question(LANG==='ru'?BANK_RU:BANK,slot,r,offsets);const detail=document.createElement('details'),summary=document.createElement('summary'),p=document.createElement('p');summary.textContent=`${r+1}. ${a?(a.correct?'✓':'✕'):'—'} ${q.text}`;summary.className=a?.correct?'review-correct':'review-wrong';p.textContent=`${t('correct').split('!')[0]}: ${q.options[q.correct]}`;detail.append(summary,p);if(a){const chosen=document.createElement('p');chosen.textContent='→ '+q.options[a.choice];detail.append(chosen);}container.append(detail);}}
+function showResults(slot){detailsPlayer=slot;const p=engine.data.players.find(x=>x.slot===slot);$('resultName').textContent=p.name+' · '+p.score+' '+t('score');renderHistory($('resultAnswers'),p.slot,p.answers,engine.data.offsets);if(!$('resultDialog').open)$('resultDialog').showModal();}
+$('closeResults').onclick=()=>{$('resultDialog').close();detailsPlayer=null;};
+function render(){applyLanguage();$('network').textContent=t(statusKey);$('transportName').textContent=t(window.NOBAI_CONFIG.transport==='firebase'?'transportFirebase':'transportPeer');if(noticeKey||noticeText)notice(noticeKey,noticeText);$('restore').hidden=!store.get('nobai-v2-host');$('resumeStudent').hidden=!clientSaved();for(const o of $('duration').options)o.textContent=o.value+' '+t('seconds');if(role==='host')renderHost();else if(state){renderStudent();renderBoard(state.board,state.slot);}if($('resultDialog').open&&detailsPlayer!==null)showResults(detailsPlayer);}
+for(const b of document.querySelectorAll('[data-lang]'))b.onclick=()=>{LANG=b.dataset.lang;try{localStorage.setItem('nobai-language',LANG);}catch{}render();};
+$('mode').onchange=()=>{if(engine?.data.phase==='lobby'){engine.data.mode=$('mode').value;enqueue(async()=>{engine.touch();await persistHost();broadcast();});}};
+$('duration').onchange=()=>{if(engine?.data.phase==='lobby'){engine.data.duration=Number($('duration').value);enqueue(async()=>{engine.touch();await persistHost();broadcast();});}};
+$('next').onclick=()=>enqueue(async()=>{if(engine.data.phase==='lobby')engine.start();else engine.next();await persistHost();broadcast();});
+$('closeRound').onclick=()=>{if(engine.data.mode==='self'&&!confirm(t('endConfirm')))return;enqueue(async()=>{engine.close();await persistHost();broadcast();});};
+$('newRoom').onclick=()=>{if(confirm(t('newConfirm'))){$('game').hidden=true;$('home').hidden=false;hostRoom();}};
+function invitation(){const url=new URL(location.href);url.search='';url.hash='';url.searchParams.set('room',room);return url.href;}
+function makeQR(){if(qrRoom===room)return;qrRoom=room;$('inviteLink').value=invitation();$('largeCode').textContent=room;try{const qr=qrcode(0,'M');qr.addData(invitation());qr.make();const svg=qr.createSvgTag({cellSize:6,margin:24,scalable:true});$('qr').innerHTML=svg;$('qrLarge').innerHTML=svg;}catch{notice('qrError');}}
+$('copy').onclick=async()=>{try{await navigator.clipboard.writeText(invitation());notice('copied');}catch{$('inviteLink').focus();$('inviteLink').select();notice('',invitation());}};
+$('qrButton').onclick=async()=>{$('qrDialog').showModal();try{await $('qrDialog').requestFullscreen?.();}catch{}};
+$('closeQr').onclick=async()=>{if(document.fullscreenElement)await document.exitFullscreen();$('qrDialog').close();};
+$('fullscreen').onclick=async()=>{try{if(document.fullscreenElement)await document.exitFullscreen();else if(document.documentElement.requestFullscreen)await document.documentElement.requestFullscreen();else throw Error();}catch{notice('fullError');}};
+$('csv').onclick=()=>{if(!engine)return;const rows=[[t('rank'),t('nameLabel'),t('points'),t('answers'),...Array.from({length:15},(_,i)=>t('question')+' '+(i+1))],...engine.board(online).map(p=>{const a=engine.data.players.find(x=>x.slot===p.slot).answers;return[p.rank,p.name,p.score,p.progress,...Array.from({length:15},(_,i)=>a[i]?(a[i].correct?100:0):'')];})];const url=URL.createObjectURL(new Blob(['\uFEFF'+rows.map(r=>r.map(QuizCore.csvCell).join(',')).join('\r\n')],{type:'text/csv;charset=utf-8'}));const a=document.createElement('a');a.href=url;a.download='nobai-'+room+'-results.csv';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);};
+setInterval(()=>{const d=role==='host'?engine?.data:state,active=d?.phase==='active'&&d?.mode==='rounds';const remaining=active?Math.max(0,Math.ceil(((role==='host'?d.deadline:localDeadline)-Date.now())/1000)):null;$('timer').textContent=remaining===null?'':remaining+' '+t('seconds');if(role==='host'&&active&&remaining===0)enqueue(async()=>{if(engine.data.phase==='active'){engine.close();await persistHost();broadcast();}});if(role==='student'&&active&&remaining===0)document.querySelectorAll('.answer').forEach(b=>b.disabled=true);},500);
+setInterval(()=>{if(role==='student'&&connection?.open){send(connection,pendingAnswer?{type:'answer',...pendingAnswer}:{type:'sync'});if(lastSeen&&Date.now()-lastSeen>15000)lost();}else if(role==='host'&&engine)renderHost();},5000);
+window.addEventListener('online',()=>{if(role==='student'&&!busy){attempts=0;join(true);}});window.addEventListener('offline',()=>{if(role==='student')lost();else status('networkError');});
+window.addEventListener('beforeunload',e=>{if(role==='host'&&engine?.data.phase==='active'){e.preventDefault();e.returnValue='';}});
+const saved=clientSaved();$('name').value=saved?.name||sessionStorage.getItem('nobai-name')||'';$('code').value=new URLSearchParams(location.search).get('room')||saved?.room||'';render();

@@ -1,20 +1,10 @@
-const assert=require('node:assert/strict');
-const bank=require('./questions.js'), core=require('./core.js');
-assert.equal(bank.length,3);assert.equal(bank.flat().length,66);
-assert.equal(new Set(bank.flat().map(q=>q[0])).size,66);
-for(const level of bank){assert.equal(level.length,22);for(const q of level){assert.equal(q.length,5);assert.equal(new Set(q.slice(1)).size,4);}}
-for(let offset=0;offset<22;offset++){
- const offsets=[offset,(offset+7)%22,(offset+13)%22];
- for(let r=0;r<15;r++){
-  const qs=Array.from({length:22},(_,s)=>core.question(bank,s,r,offsets));
-  assert.equal(new Set(qs.map(q=>q.text)).size,22);
-  for(const q of qs)assert.equal(q.options[q.correct],bank[q.level][q.index][1]);
- }
- for(let s=0;s<22;s++){
-  const qs=Array.from({length:15},(_,r)=>core.question(bank,s,r,offsets));assert.equal(new Set(qs.map(q=>q.text)).size,15);
-  for(let l=0;l<3;l++)assert.equal(qs.filter(q=>q.level===l).length,5);
- }
-}
-assert.deepEqual(core.ranking([{slot:0,score:100},{slot:1,score:200},{slot:2,score:200},{slot:3,score:0}]).map(x=>x.rank),[1,1,3,4]);
-assert.equal(core.csvCell('=1+1'),'"\'=1+1"');assert.equal(core.csvCell('А,"Б"'),'"А,""Б"""');
-console.log('PASS: 66 questions; 22 students x 15 rounds x 22 offsets; uniqueness; level balance; correct options; ties; CSV escaping.');
+'use strict';
+const assert=require('node:assert/strict');const bank=require('./questions.js'),ru=require('./questions-ru.js'),C=require('./core.js'),words=require('./i18n.js');
+for(const b of[bank,ru]){assert.equal(b.flat().length,66);assert.equal(new Set(b.flat().map(q=>q[0])).size,66);for(const level of b){assert.equal(level.length,22);for(const q of level){assert.equal(q.length,5);assert.equal(new Set(q.slice(1)).size,4);assert(q.every(x=>typeof x==='string'&&x.length));}}}
+for(const [k,v]of Object.entries(words)){assert.equal(v.length,2,k);assert(v[0]&&v[1],k);}
+for(let offset=0;offset<22;offset++){const offsets=[offset,(offset+7)%22,(offset+13)%22];for(let r=0;r<15;r++){const qs=Array.from({length:30},(_,s)=>C.question(bank,s,r,offsets));assert.equal(new Set(qs.map(q=>q.id)).size,30);for(let s=0;s<30;s++){const kk=qs[s],rr=C.question(ru,s,r,offsets);assert.equal(kk.correct,rr.correct);assert.equal(kk.id,rr.id);assert.equal(kk.options[kk.correct],bank[kk.level][kk.index][1]);}}for(let s=0;s<30;s++){const qs=Array.from({length:15},(_,r)=>C.question(bank,s,r,offsets));assert.equal(new Set(qs.map(q=>q.id)).size,15);for(let l=0;l<3;l++)assert.equal(qs.filter(q=>q.level===l).length,5);}}
+const tokens=Array.from({length:30},(_,i)=>'student-token-000000-'+i);
+async function exercise(mode){let e=new C.RoomEngine(bank);e.data.mode=mode;e.data.room='123456';await Promise.all(tokens.map((tok,i)=>Promise.resolve().then(()=>e.join(tok,'Ученик '+i))));assert.equal(e.data.players.length,30);assert.throws(()=>e.join('student-token-overflow','31'),/full/);e.join(tokens[0],'Ученик 0');assert.equal(e.data.players.length,30);e.start(1000);
+let responses=0;for(let r=0;r<15;r++){await Promise.all(tokens.map(tok=>Promise.resolve().then(()=>{const p=e.data.players.find(x=>x.token===tok),choice=e.q(p,r).correct;const res=e.answer(tok,r,choice,1001);assert(res.accepted);responses++;assert(e.answer(tok,r,choice,1002).duplicate);assert.equal(p.score,(r+1)*100);})));if(r===6){const snapshot=JSON.stringify(e.save());e=new C.RoomEngine(bank,JSON.parse(snapshot));for(const tok of tokens)e.join(tok,'ignored');assert.equal(e.data.players.length,30);}if(mode==='rounds'){e.close();e.next(1000);}}
+assert.equal(e.data.phase,'ended');assert(e.data.players.every(p=>p.score===1500&&p.progress===15));assert(e.board().every(p=>p.rank===1));return responses;}
+(async()=>{const start=performance.now();const a=await exercise('rounds'),b=await exercise('self');let e=new C.RoomEngine(bank);e.join(tokens[0],'A');e.start(1000);assert.equal(e.answer(tokens[0],0,0,50000).accepted,false);assert.equal(e.answer(tokens[0],1,0,1001).accepted,false);assert.equal(e.answer(tokens[0],0,9,1001).accepted,false);assert.equal(e.data.players[0].score,0);assert.equal(C.csvCell('=1+1'),'"\'=1+1"');assert.deepEqual(C.ranking([{slot:0,score:100},{slot:1,score:200},{slot:2,score:200},{slot:3,score:0}]).map(p=>p.rank),[1,1,3,4]);console.log(JSON.stringify({passed:true,participants:30,modes:2,acceptedAnswers:a+b,duplicateRetries:a+b,hostSnapshotRestore:true,rejoinNoDuplicates:true,elapsedMs:Math.round(performance.now()-start),scope:'IN-PROCESS SIMULATION, not real WebRTC/Firebase network load'},null,2));})();
