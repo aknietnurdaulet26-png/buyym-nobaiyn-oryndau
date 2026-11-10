@@ -1,7 +1,7 @@
 // Публичная web-конфигурация. Никогда не добавляйте private_key/service-account JSON.
 window.NOBAI_CONFIG = {
   // 'peerjs' сохраняет существующий транспорт. Для Firebase: 'firebase' + firebaseConfig.
-  transport: 'peerjs',
+  transport: 'firebase',
   // Web App Nobai LAB. Keep PeerJS until the Database Rules are installed and the live room is tested.
   firebaseConfig: {
     apiKey: 'AIzaSyBKAy26YksqhZZu9_OWEtfFsdAe_lelXv0',
